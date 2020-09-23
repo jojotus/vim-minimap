@@ -17,6 +17,7 @@
 
 import os
 import sys
+import math
 PY3 = sys.version_info[0] == 3
 
 import vim
@@ -82,9 +83,7 @@ def showminimap():
 
         # set all autocmds in a group
         setmmautocmd()
-
         minimap = vim.current.window
-
         minimap.width = WIDTH
 
         # fixed size
@@ -93,14 +92,14 @@ def showminimap():
         # Restore the active window
         vim.current.window = src
 
-    vim.command(":call minimap#UpdateMinimap()")
+    updateminimap()
 
 def updateminimap():
     minimap = getmmwindow()
+    if not minimap:
+        return
+
     src = vim.current.window
-
-    HORIZ_SCALE = 0.2
-
 
     if not hasattr(src, 'buffer'):
         return
@@ -110,101 +109,75 @@ def updateminimap():
     if "NERD_tree" in src.buffer.name:
          return
 
-    if minimap and src.buffer == minimap.buffer:
+    if src.buffer == minimap.buffer:
+        return
 
-         mainwindow = getmainwindow()
-         if mainwindow is None:
-             return
+    HORIZ_SCALE = 0.2
 
-         if src.buffer != mainwindow.buffer:
-             position_in_minimap = src.cursor[0]
+    mode = vim.eval("mode()")
+    cursor = src.cursor
 
-             ratio =  float(len(minimap.buffer)) / float(len(mainwindow.buffer))
+    vim.command("normal! H")
+    topline = src.cursor[0]
+    bottomline = topline + src.height - 1
 
-             new_position = int(float(position_in_minimap) / ratio)
-             if new_position > len(mainwindow.buffer):
-                 new_position = len(mainwindow.buffer)
+    def draw(line_infos):
+        c = Canvas()
+        for y, info in enumerate(line_infos):
+            indent = int(info['indent'] * HORIZ_SCALE)
+            length = int(info['length'] * HORIZ_SCALE)
+            for x in range(2 * min(length, WIDTH)):
+                if x >= indent:
+                    c.set(x, y)
+        # pad with spaces to ensure uniform block highlighting
+        if PY3:
+            return [line.ljust(WIDTH, u'\u00A0') for line in c.rows()]
+        else:
+            return [unicode(line).ljust(WIDTH, u'\u00A0') for line in c.rows()]
 
-             mainwindow.cursor = (new_position, 0) # move to top left
-             vim.current.window = mainwindow
-             updateminimap()
+    vim.current.window = minimap
+    highlight_group = vim.eval("g:minimap_highlight")
 
-    if minimap and src.buffer != minimap.buffer:
+    mmheight = 4 * minimap.height
+    line_infos = [{'length': 0, 'indent': 0} for x in range(mmheight)]
 
-        mode = vim.eval("mode()")
-        cursor = src.cursor
+    heightrat = max(1.0, len(src.buffer) / mmheight)
+    for i, line in enumerate(src.buffer):
+        length = len(line)
+        indent = length - len(line.lstrip())
+        j = int(i / heightrat)
+        line_infos[j]['length'] = max(line_infos[j]['length'], length)
+        line_infos[j]['indent'] = max(line_infos[j]['indent'], indent)
 
-        vim.command("normal! H")
-        topline = src.cursor[0]
-        vim.command("normal! L")
-        bottomline = src.cursor[0]
+    vim.command(":setlocal modifiable")
 
-        def draw(lengths,indents, startline=0):
+    minimap.buffer[:] = draw(line_infos)
+    # Highlight the current visible zone
+    tmp = len(minimap.buffer) / len(src.buffer)
+    top = min(len(minimap.buffer) - 1, int(topline * tmp))
+    bottom = top + math.ceil(src.height * tmp)
+    vim.command("match {0} /\\%>0v\\%<{1}v\\%>{2}l\\%<{3}l./".format(
+        highlight_group, WIDTH + 1, top, bottom))
 
-            c = Canvas()
+    # center the highlighted zone
+    height = int(vim.eval("winheight(0)"))
+    # first, put the cursor at the top of the buffer
+    vim.command("normal! gg")
+    # then, jump so that the active zone is centered
+    if (top + (bottom - top) / 2) > height / 2:
+        jump = min(top + (bottom - top) / 2 + height / 2, len(minimap.buffer))
+        vim.command("normal! %dgg" % jump)
 
-            for y, l in enumerate(lengths):
-                indent = int(indents[y] * HORIZ_SCALE)
-                for x in range(2 * min(int(l * HORIZ_SCALE), WIDTH)):
-                    if(x>=indent):
-                        c.set(x, y)
+    # prevent any further modification
+    vim.command(":setlocal nomodifiable")
 
-            # pad with spaces to ensure uniform block highlighting
-            if PY3:
-                return [line.ljust(WIDTH, u'\u00A0') for line in c.rows()]
-            else:
-                return [unicode(line).ljust(WIDTH, u'\u00A0') for line in c.rows()]
+    vim.current.window = src
 
-        if minimap:
+    # restore the current selection if we were in visual mode.
+    if mode in ('v', 'V', '\026'):
+        vim.command("normal! gv")
 
-            vim.current.window = minimap
-            highlight_group = vim.eval("g:minimap_highlight")
-            lengths = []
-            indents = []
-
-            bufferlen = len(src.buffer)
-            more_on_top = 0
-            more_on_bottom = 0
-            if bufferlen > 160 + bottomline - topline:
-                if topline < 80:
-                    more_on_bottom = 80 - topline
-                if bottomline + 80 > bufferlen:
-                    more_on_top = bottomline + 80 - bufferlen
-            first = max(topline - 80 - more_on_top, 1)
-            last = min(bottomline + 80 + more_on_bottom, bufferlen)
-            for line in range(first, last):
-                linestring = src.buffer[line]
-                indents.append(len(linestring) - len(linestring.lstrip()))
-                lengths.append(len(linestring))
-
-            vim.command(":setlocal modifiable")
-
-            minimap.buffer[:] = draw(lengths,indents)
-            # Highlight the current visible zone
-            top = int((topline - first) / 4)
-            bottom = int((bottomline -first)/ 4 + 1)
-            vim.command("match {0} /\\%>0v\\%<{1}v\\%>{2}l\\%<{3}l./".format(
-                highlight_group, WIDTH + 1, top, bottom))
-
-            # center the highlighted zone
-            height = int(vim.eval("winheight(0)"))
-            # first, put the cursor at the top of the buffer
-            vim.command("normal! gg")
-            # then, jump so that the active zone is centered
-            if (top + (bottom - top) / 2) > height / 2:
-                jump = min(top + (bottom - top) / 2 + height / 2, len(minimap.buffer))
-                vim.command("normal! %dgg" % jump)
-
-            # prevent any further modification
-            vim.command(":setlocal nomodifiable")
-
-            vim.current.window = src
-
-            # restore the current selection if we were in visual mode.
-            if mode in ('v', 'V', '\026'):
-                vim.command("normal! gv")
-
-            src.cursor = cursor
+    src.cursor = cursor
 
 def closeminimap():
     minimap = getmmwindow()
