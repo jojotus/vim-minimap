@@ -112,7 +112,7 @@ def updateminimap():
     if src.buffer == minimap.buffer:
         return
 
-    HORIZ_SCALE = 0.2
+    HORIZ_SCALE = 0.5
 
     mode = vim.eval("mode()")
     cursor = src.cursor
@@ -121,13 +121,39 @@ def updateminimap():
     topline = src.cursor[0]
     bottomline = topline + src.height - 1
 
+    vim.current.window = minimap
+    highlight_group = vim.eval("g:minimap_highlight")
+
+    mmheight = 4 * minimap.height
+    line_infos = [{'count': 0.0, 'weight': [0.0] * 2 * WIDTH} for _ in range(mmheight)]
+
+    def char_weight(c):
+        if c == ' ' or c == '\t':
+            return 0.0
+        if c == '.' or c == ',' or c == '\'':
+            return 0.2
+        if c == '|' or c == '-' or c == '#':
+            return 2.0
+        return 1.0
+
+    heightrat = max(1.0, len(src.buffer) / mmheight)
+    for y, line in enumerate(src.buffer):
+        ymm = int(y / heightrat)
+        line_infos[ymm]['count'] += 1.0 / HORIZ_SCALE
+        for x, c in enumerate(line):
+            xmm = int(x * HORIZ_SCALE)
+            if xmm >= len(line_infos[ymm]['weight']):
+                continue
+            line_infos[ymm]['weight'][xmm] += char_weight(c)
+
+
     def draw(line_infos):
         c = Canvas()
         for y, info in enumerate(line_infos):
-            indent = int(info['indent'] * HORIZ_SCALE)
-            length = int(info['length'] * HORIZ_SCALE)
-            for x in range(2 * min(length, WIDTH)):
-                if x >= indent:
+            for x in range(len(info['weight'])):
+                if info['count'] == 0:
+                    continue
+                if info['weight'][x] / info['count'] >= 0.5:
                     c.set(x, y)
         # pad with spaces to ensure uniform block highlighting
         if PY3:
@@ -135,22 +161,7 @@ def updateminimap():
         else:
             return [unicode(line).ljust(WIDTH, u'\u00A0') for line in c.rows()]
 
-    vim.current.window = minimap
-    highlight_group = vim.eval("g:minimap_highlight")
-
-    mmheight = 4 * minimap.height
-    line_infos = [{'length': 0, 'indent': 0} for x in range(mmheight)]
-
-    heightrat = max(1.0, len(src.buffer) / mmheight)
-    for i, line in enumerate(src.buffer):
-        length = len(line)
-        indent = length - len(line.lstrip())
-        j = int(i / heightrat)
-        line_infos[j]['length'] = max(line_infos[j]['length'], length)
-        line_infos[j]['indent'] = max(line_infos[j]['indent'], indent)
-
     vim.command(":setlocal modifiable")
-
     minimap.buffer[:] = draw(line_infos)
     # Highlight the current visible zone
     tmp = len(minimap.buffer) / len(src.buffer)
